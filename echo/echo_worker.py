@@ -269,13 +269,14 @@ def main():
     def read_update(st, S, data, K, upd, p0, s, T, H_S, meta, ref_param):
         """Read a LoRA update (ΔA, ΔB) from p0: exactly as upd_worker.py (scaled in (A, B) space, needs ref_param),
         and linearised in W_eff, whole ("_lin") and split into s·B·ΔA ("_B") and s·ΔB·A ("_A"), scaled to T."""
+        ech.set_lora(p0, s, dev)
         if ref_param is not None and not done(st, S, data, f"upd{K}"):
             un = math.sqrt(sum(float(da.float().pow(2).sum() + db.float().pow(2).sum()) for da, db in upd.values()))
             c = ref_param / un
             ech.set_lora({k: (a + c * upd[k][0].float().to(a.device), b + c * upd[k][1].float().to(a.device))
-                          for k, (a, b) in p0.items()}, s, dev, dt)
-            record(st, S, data, f"upd{K}", readout(), H_S, meta | {"c": c})
-            ech.set_lora(p0, s, dev, dt)
+                          for k, (a, b) in p0.items()}, s, dev)
+            record(st, S, f"upd{K}", data, readout(), H_S, meta | {"c": c})
+            ech.set_lora(p0, s, dev)
         for arm, mk in (("_lin", lambda a, b, da, db: [(s * db, a), (s * b, da)]),
                         ("_B", lambda a, b, da, db: [(s * b, da)]),
                         ("_A", lambda a, b, da, db: [(s * db, a)])):
@@ -288,7 +289,7 @@ def main():
                 continue
             ech.factored = {k: [(u.to(dt), v.to(dt)) for u, v in pp] for k, pp in pairs.items()}
             ech.arm, ech.eps = "factored", T / math.sqrt(n2)
-            record(st, S, data, f"upd{K}{arm}", readout(), H_S, meta | {"eps": ech.eps, "norm": math.sqrt(n2)})
+            record(st, S, f"upd{K}{arm}", data, readout(), H_S, meta | {"eps": ech.eps, "norm": math.sqrt(n2)})
             ech.arm, ech.factored = None, {}
 
     def adam_updates(rows, p0, s, windows, lr=1e-4):
@@ -333,9 +334,9 @@ def main():
         r, s = nxt[2], nxt[1]
         T = math.sqrt(E.eff_diff_sq_norm(cur[0] if cur else None, nxt[0], s, s)) * 1000 / args.gap
         if cur:
-            ech.set_lora(cur[0], s, dev, dt)
+            ech.set_lora(cur[0], s, dev)
         else:
-            ech.set_lora({}, 0.0, dev, dt)
+            ech.set_lora({}, 0.0, dev)
         ech.set_fresh(r, 1234 + S, dev, dt)
         ech.arm = None
         H_S = readout() if cur else H_base
@@ -348,7 +349,7 @@ def main():
 
             # cached Adam updates
             ref_param = math.sqrt(sum(float((nxt[0][k][0].float() - a).pow(2).sum() + (nxt[0][k][1].float() - b).pow(2).sum())
-                                      for k, (a, b) in p_cur.items()))
+                                      for k, (a, b) in p_cur.items())) * 1000 / args.gap
             for K in (1, 25):
                 if all(done(st, S, "cached", f"upd{K}{x}") for x in ("", "_lin", "_B", "_A")):
                     continue
@@ -366,7 +367,7 @@ def main():
             ups = adam_updates(random.Random(S).sample(src, min(200, len(src))), start, s, (1, 25))
             for K, upd in ups.items():
                 read_update(st, S, data, K, upd, start, s, T, H_S, meta, ref_param if cur else None)
-            ech.set_lora(p_cur, s, dev, dt) if cur else ech.set_lora({}, 0.0, dev, dt)
+            ech.set_lora(p_cur, s, dev) if cur else ech.set_lora({}, 0.0, dev)
 
         arms = E.D_ARMS if cur else ["dense", "fresh"]
         for data in [d for d in args.data.split(",") if not d.startswith("adam-")]:

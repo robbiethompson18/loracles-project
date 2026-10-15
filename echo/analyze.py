@@ -11,9 +11,21 @@ import argparse, json, statistics
 from collections import defaultdict
 
 ANIMALS = ["dolphin", "whale", "tiger", "butterfly", "owl"]
-ORDER = [("ckpt", "ckpt"), ("cached", "upd1"), ("cached", "upd1_B"), ("cached", "upd1_A"), ("cached", "upd25"),
-         ("cached", "upd25_B"), ("cached", "upd25_A")] + \
+UPD = [f"upd{K}{x}" for K in (1, 25) for x in ("", "_lin", "_B", "_A")]
+ORDER = [("ckpt", "ckpt")] + [(d, a) for d in ("cached", "adam-num", "adam-bank") for a in UPD] + \
         [(d, a) for d in ("num", "bank", "rand") for a in ("dense", "fresh", "lora", "B", "A")]
+
+
+def load(paths):
+    """Rows, last one wins per (student, S, data, arm). Early runs wrote update rows with data/arm swapped."""
+    rows = {}
+    for f in paths:
+        for line in open(f):
+            r = json.loads(line)
+            if r["data"].startswith("upd"):
+                r["data"], r["arm"] = r["arm"], r["data"]
+            rows[(r["student"], r["S"], r["data"], r["arm"])] = r
+    return list(rows.values())
 
 
 def best(g):
@@ -35,7 +47,7 @@ def main():
     ap.add_argument("--layer", default="32")
     ap.add_argument("--s0", action="store_true", help="only S = 0 (init) rows")
     args = ap.parse_args()
-    recs = [json.loads(l) for f in args.summary for l in open(f)]
+    recs = load(args.summary)
     own, oth, bank = defaultdict(list), defaultdict(list), defaultdict(list)
     students = []
     for r in recs:

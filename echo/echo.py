@@ -123,17 +123,19 @@ class Echo:
             x = inp[0]
             if k in self.lora:
                 A, B = self.lora[k]
-                out = out + self.s * ((x @ A.to(x.dtype).T) @ B.to(x.dtype).T)
+                # in the LoRA factors' dtype (fp32 on GPU, as PEFT keeps adapters), then cast back like PEFT does
+                out = out + (self.s * ((x.to(A.dtype) @ A.T) @ B.T)).to(out.dtype)
             if self.arm == "factored":
                 for U, V in self.factored.get(k, ()):
                     out = out + self.eps * ((x @ V.T) @ U.T)
             elif self.arm is not None:
-                A, B = self.lora.get(k, (None, None))
+                A, B = (t if t is None else t.to(x.dtype) for t in self.lora.get(k, (None, None)))
                 out = out + self.eps * d_arm_apply(self.arm, x, mod.weight.grad, A, B, self.A0[k])
             return out
         return f
 
-    def set_lora(self, factors, s, device, dtype):
+    def set_lora(self, factors, s, device, dtype=torch.float32):
+        """dtype is the adapter's compute dtype: keep fp32 (PEFT's default) so that A + c·ΔA isn't rounded to bf16."""
         self.lora = {k: (a.to(device, dtype), b.to(device, dtype)) for k, (a, b) in factors.items()}
         self.s = s
 
