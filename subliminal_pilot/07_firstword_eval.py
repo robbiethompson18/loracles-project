@@ -33,11 +33,12 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--gpu-mem", type=float, default=0.9, help="vLLM gpu_memory_utilization (lower to share a GPU)")
+    ap.add_argument("--max-lora-rank", type=int, default=32, help="vLLM only accepts some values (8, 16, 32, 64, 128, 256, ...)")
     args = ap.parse_args()
 
     prompts = json.load(open(Path(__file__).parent / "eval_questions_slsteering.json"))["animal_prompts"]
     models = ([] if args.no_base else [("base", None)]) + [tuple(x.split("=", 1)) for x in args.lora]
-    llm = LLM(c.BASE_MODEL, dtype="bfloat16", enable_lora=True, max_lora_rank=32, max_loras=1,
+    llm = LLM(c.BASE_MODEL, dtype="bfloat16", enable_lora=True, max_lora_rank=args.max_lora_rank, max_loras=1,
               max_model_len=512, seed=args.seed, gpu_memory_utilization=args.gpu_mem)
     sp = SamplingParams(temperature=1.0, max_tokens=16, n=args.samples, seed=args.seed)
     convs = [[{"role": "user", "content": q}] for q in prompts]
