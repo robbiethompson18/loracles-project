@@ -69,6 +69,7 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=1)
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--alpha", type=int, default=16)
+    ap.add_argument("--rslora", action="store_true", help="scale by alpha/sqrt(r) instead of alpha/r")
     ap.add_argument("--save-every", type=int, default=500)
     ap.add_argument("--sched", choices=["linear", "cosine"], default="linear")
     ap.add_argument("--warmup-ratio", type=float, default=None,
@@ -103,7 +104,7 @@ def main():
     if args.grad_checkpointing:
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
-    model = get_peft_model(model, LoraConfig(r=args.rank, lora_alpha=args.alpha, lora_dropout=0.0,
+    model = get_peft_model(model, LoraConfig(r=args.rank, lora_alpha=args.alpha, lora_dropout=0.0, use_rslora=args.rslora,
                                              target_modules=TARGETS, task_type="CAUSAL_LM"))
     model.print_trainable_parameters()
 
