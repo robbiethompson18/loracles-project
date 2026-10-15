@@ -40,7 +40,7 @@ def create(name, disk):
     for cloud in ("COMMUNITY", "SECURE"):
         for gpu in GPUS:
             q = ("mutation { podFindAndDeployOnDemand(input: {"
-                 f'cloudType: {cloud}, gpuCount: 1, volumeInGb: 0, containerDiskInGb: {disk}, minVcpuCount: 8, minMemoryInGb: 64, '
+                 f'cloudType: {cloud}, gpuCount: 1, volumeInGb: 0, containerDiskInGb: {disk}, minVcpuCount: 6, minMemoryInGb: 48, '
                  f'gpuTypeId: "{gpu}", name: "{name}", imageName: "{IMAGE}", ports: "22/tcp", volumeMountPath: "/workspace", '
                  f'supportPublicIp: true, env: [{{key: "PUBLIC_KEY", value: "{pub}"}}]'
                  "}) { id costPerHr machine { gpuDisplayName } } }")

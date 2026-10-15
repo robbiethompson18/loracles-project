@@ -266,6 +266,58 @@ def main():
                 m.weight.grad = torch.empty_like(m.weight)
             m.weight.grad.normal_(generator=gen)
 
+    def read_update(st, S, data, K, upd, p0, s, T, H_S, meta, ref_param):
+        """Read a LoRA update (ΔA, ΔB) from p0: exactly as upd_worker.py (scaled in (A, B) space, needs ref_param),
+        and linearised in W_eff, whole ("_lin") and split into s·B·ΔA ("_B") and s·ΔB·A ("_A"), scaled to T."""
+        if ref_param is not None and not done(st, S, data, f"upd{K}"):
+            un = math.sqrt(sum(float(da.float().pow(2).sum() + db.float().pow(2).sum()) for da, db in upd.values()))
+            c = ref_param / un
+            ech.set_lora({k: (a + c * upd[k][0].float().to(a.device), b + c * upd[k][1].float().to(a.device))
+                          for k, (a, b) in p0.items()}, s, dev, dt)
+            record(st, S, data, f"upd{K}", readout(), H_S, meta | {"c": c})
+            ech.set_lora(p0, s, dev, dt)
+        for arm, mk in (("_lin", lambda a, b, da, db: [(s * db, a), (s * b, da)]),
+                        ("_B", lambda a, b, da, db: [(s * b, da)]),
+                        ("_A", lambda a, b, da, db: [(s * db, a)])):
+            if done(st, S, data, f"upd{K}{arm}"):
+                continue
+            pairs = {k: [(u.to(dev), v.to(dev)) for u, v in mk(a.to(dev), b.to(dev), upd[k][0].float().to(dev), upd[k][1].float().to(dev))]
+                     for k, (a, b) in p0.items()}
+            n2 = sum(float(E.factored_sq_norm(v)) for v in pairs.values())
+            if n2 == 0:
+                continue
+            ech.factored = {k: [(u.to(dt), v.to(dt)) for u, v in pp] for k, pp in pairs.items()}
+            ech.arm, ech.eps = "factored", T / math.sqrt(n2)
+            record(st, S, data, f"upd{K}{arm}", readout(), H_S, meta | {"eps": ech.eps, "norm": math.sqrt(n2)})
+            ech.arm, ech.factored = None, {}
+
+    def adam_updates(rows, p0, s, windows, lr=1e-4):
+        """Fresh AdamW (the training recipe's wd 0, clip 1.0, batch 8) on the LoRA factors from p0;
+        returns {K: {key: (ΔA, ΔB)}} after K steps."""
+        params = {k: (a.to(dev).clone().requires_grad_(True), b.to(dev).clone().requires_grad_(True)) for k, (a, b) in p0.items()}
+        ech.lora, ech.s = params, s
+        flat = [t for ab in params.values() for t in ab]
+        opt = torch.optim.AdamW(flat, lr=lr, weight_decay=0.0)
+        ex = [encode(tok, r["prompt"], r["completion"]) for r in rows]
+        pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+        out = {}
+        for step in range(1, max(windows) + 1):
+            mb = ex[(step - 1) * 8 % len(ex):][:8]
+            Lm = max(len(i) for i, _ in mb)
+            ids = torch.full((len(mb), Lm), pad)
+            lab = torch.full((len(mb), Lm), -100)
+            att = torch.zeros((len(mb), Lm), dtype=torch.long)
+            for i, (x, y) in enumerate(mb):
+                ids[i, :len(x)], lab[i, :len(y)], att[i, :len(x)] = torch.tensor(x), torch.tensor(y), 1
+            model(input_ids=ids.to(dev), attention_mask=att.to(dev), labels=lab.to(dev), use_cache=False).loss.backward()
+            torch.nn.utils.clip_grad_norm_(flat, 1.0)
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+            if step in windows:
+                out[step] = {k: (a.detach() - p0[k][0].to(dev), b.detach() - p0[k][1].to(dev)) for k, (a, b) in params.items()}
+        del opt, params, flat
+        return out
+
     H_base = readout()
     for name, S in jobs:
         st = students[name]
@@ -288,39 +340,36 @@ def main():
         ech.arm = None
         H_S = readout() if cur else H_base
         meta = {"T": T, "r": r, "s": s}
+        p_cur = {k: (a.float(), b.float()) for k, (a, b) in cur[0].items()} if cur else None
         if cur:
             meta["spectrum"] = E.spectrum_stats(cur[0], s)
             if not done(st, S, "ckpt", "ckpt"):
                 record(st, S, "ckpt", "ckpt", H_S, H_base, meta)
 
             # cached Adam updates
-            p_cur = {k: (a.float(), b.float()) for k, (a, b) in cur[0].items()}
             ref_param = math.sqrt(sum(float((nxt[0][k][0].float() - a).pow(2).sum() + (nxt[0][k][1].float() - b).pow(2).sum())
                                       for k, (a, b) in p_cur.items()))
             for K in (1, 25):
                 if all(done(st, S, "cached", f"upd{K}{x}") for x in ("", "_lin", "_B", "_A")):
                     continue
                 upd = st.update(S, K)
-                if upd is None:
-                    continue
-                un = math.sqrt(sum(float(da.float().pow(2).sum() + db.float().pow(2).sum()) for da, db in upd.values()))
-                c = ref_param / un  # upd_worker.py's scaling, in (A, B) space
-                ech.set_lora({k: (a + c * upd[k][0].float(), b + c * upd[k][1].float()) for k, (a, b) in p_cur.items()}, s, dev, dt)
-                record(st, S, "cached", f"upd{K}", readout(), H_S, meta | {"c": c})
-                ech.set_lora(cur[0], s, dev, dt)
-                for arm, mk in (("_lin", lambda a, b, da, db: [(s * db, a), (s * b, da)]),
-                                ("_B", lambda a, b, da, db: [(s * b, da)]),
-                                ("_A", lambda a, b, da, db: [(s * db, a)])):
-                    pairs = {k: mk(a, b, upd[k][0].float(), upd[k][1].float()) for k, (a, b) in p_cur.items()}
-                    n2 = sum(float(E.factored_sq_norm(v)) for v in pairs.values())
-                    ech.factored = {k: [(u.to(dev, dt), v.to(dev, dt)) for u, v in pp] for k, pp in pairs.items()}
-                    ech.arm, ech.eps = "factored", T / math.sqrt(n2)
-                    record(st, S, "cached", f"upd{K}{arm}", readout(), H_S, meta | {"eps": ech.eps, "norm": math.sqrt(n2)})
-                    ech.arm, ech.factored = None, {}
+                if upd is not None:
+                    read_update(st, S, "cached", K, upd, p_cur, s, T, H_S, meta, ref_param)
                 del upd
 
+        # fresh AdamW steps from θ[S] (B = 0, random A at S = 0) on the student's numbers or on bank rows
+        for data in [d for d in args.data.split(",") if d.startswith("adam-")]:
+            if all(done(st, S, data, f"upd{K}{x}") for K in (1, 25) for x in (("", "_lin", "_B", "_A") if cur else ("_lin", "_B", "_A"))):
+                continue
+            src = st.data() if data == "adam-num" else bank_rows(200, seed=S)
+            start = p_cur if cur else {k: (ech.A0[k].float(), torch.zeros(ech.mods[k].out_features, r, device=dev)) for k in ech.mods}
+            ups = adam_updates(random.Random(S).sample(src, min(200, len(src))), start, s, (1, 25))
+            for K, upd in ups.items():
+                read_update(st, S, data, K, upd, start, s, T, H_S, meta, ref_param if cur else None)
+            ech.set_lora(p_cur, s, dev, dt) if cur else ech.set_lora({}, 0.0, dev, dt)
+
         arms = E.D_ARMS if cur else ["dense", "fresh"]
-        for data in args.data.split(","):
+        for data in [d for d in args.data.split(",") if not d.startswith("adam-")]:
             if all(done(st, S, data, a) for a in arms):
                 continue
             if data == "rand":

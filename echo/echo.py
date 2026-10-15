@@ -123,7 +123,7 @@ class Echo:
             x = inp[0]
             if k in self.lora:
                 A, B = self.lora[k]
-                out = out + self.s * ((x @ A.T) @ B.T)
+                out = out + self.s * ((x @ A.to(x.dtype).T) @ B.to(x.dtype).T)
             if self.arm == "factored":
                 for U, V in self.factored.get(k, ()):
                     out = out + self.eps * ((x @ V.T) @ U.T)
